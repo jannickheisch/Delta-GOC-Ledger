@@ -1,0 +1,37 @@
+#!/bin/bash
+# Creates a tree consisting of the given blobs and trees and returns it in the ls-tree format.
+# The created tree is not written to the object db.
+# Note: There is no validation if the created tree is valid, it just converts the input into the ls-tree format.
+#
+# Usage: ls-tree-format [-b blob_sha1:path] [-t tree_sha1:path] 
+
+BLOB_OBJECTMODE=100644
+TREE_OBJECTMODE=040000
+
+OUTPUT=""
+
+while getopts 'b:t:' opt; do
+  case "$opt" in
+    b) #handle blob
+      arg="$OPTARG"
+      hash="$(echo $arg | awk -F : '{print $1}')"
+      path="$(echo $arg | awk -F: '{print $2}')"
+
+      OUTPUT="$OUTPUT$BLOB_OBJECTMODE blob $hash\t\"$path\"\n" 
+      ;;
+
+    t) #handle tree
+      arg="$OPTARG"
+      hash="$(echo $arg | awk -F : '{print $1}')"
+      path="$(echo $arg | awk -F: '{print $2}')"
+      OUTPUT="$OUTPUT$TREE_OBJECTMODE tree $hash\t\"$path\"\n" 
+      ;;
+    ?|h)
+      echo "Usage: ls-tree-format [-b blob_sha1:path] [-t tree_sha1:path] "
+      exit 1
+      ;;
+  esac
+done
+shift "$(($OPTIND -1))"
+
+echo ${OUTPUT%\\n} # remove trailing new-line 

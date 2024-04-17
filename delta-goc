@@ -1,0 +1,195 @@
+#!/bin/bash
+SCRIPTDIR="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
+SCRIPT_FOLDER="$SCRIPTDIR/git-goc-delta"
+ACCOUNTS_DIR="$SCRIPTDIR/delta-accounts"
+
+function token_id_from_alias() {
+    repo_path=$1
+    alias=$2
+
+    token="$($SCRIPT_FOLDER/alias-get-token-id $repo_path $alias)"
+    
+    if [ -z $token ]; then
+        echo "Unknown token alias '$alias'"
+        exit 1
+    fi
+}
+
+function author_id_from_alias() {
+    repo_path=$1
+    alias=$2
+
+    author_id="$($SCRIPT_FOLDER/alias-get-author-id $repo_path $alias)"
+
+    if [ -z $author_id ]; then
+        echo "Unknow account '$alias'"
+        exit 1
+    fi
+}
+
+function print_usage() {
+    echo "usage: delta-goc <operation type> <operation> [operation arguments]"
+    echo "see https://github.com/jannickheisch/Delta-GOC-Ledger/blob/main/README.md for further information"
+}
+
+# print usage/help text
+if [ -z $1 ]; then
+    print_usage
+    exit 1
+fi
+
+if [ "$1" = "-h" ]; then
+    print_usage
+    exit 0
+fi
+
+# parse command
+case "$1" in
+
+    author)
+        case $2 in
+            init|initialize)
+                $SCRIPT_FOLDER/author-initialize "$ACCOUNTS_DIR/$3" $3
+            ;;
+
+            *)
+                echo "Unknown option '$2' for 'delta-goc author'"
+                print_usage
+                exit 1
+            ;;
+        esac
+        ;;
+
+    token)
+        case "$2" in
+            
+            init|initialize)
+                $SCRIPT_FOLDER/token-initialize "$ACCOUNTS_DIR/$3" $4
+            ;;
+
+            create)
+                token_id_from_alias "$ACCOUNTS_DIR/$3" $4
+                $SCRIPT_FOLDER/token-create "$ACCOUNTS_DIR/$3" $token $5
+            ;;
+
+            burn)
+                token_id_from_alias "$ACCOUNTS_DIR/$3" $4
+                $SCRIPT_FOLDER/token-burn "$ACCOUNTS_DIR/$3" $token $5
+            ;;
+
+            giveto|giveTo)
+                token_id_from_alias "$ACCOUNTS_DIR/$3" $4
+                author_id_from_alias "$ACCOUNTS_DIR/$3" $5
+                $SCRIPT_FOLDER/token-giveTo "$ACCOUNTS_DIR/$3" $token $author_id $6
+            ;;
+
+            ackfrom|ackFrom)
+                token_id_from_alias "$ACCOUNTS_DIR/$3" $4
+                author_id_from_alias "$ACCOUNTS_DIR/$3" $5
+                $SCRIPT_FOLDER/token-ackFrom "$ACCOUNTS_DIR/$3" $token $author_id
+            ;;
+
+            checkpoint)
+                token_id_from_alias "$ACCOUNTS_DIR/$3" $4
+                author_id_from_alias "$ACCOUNTS_DIR/$3" $5
+                $SCRIPT_FOLDER/account-checkpoint "$ACCOUNTS_DIR/$3" $token $author_id
+            ;;
+
+            balance)
+                token_id_from_alias "$ACCOUNTS_DIR/$3" $4
+                if [ ! -z "$5" ]; then
+                    author_id_from_alias "$ACCOUNTS_DIR/$3" $5
+                fi
+                $SCRIPT_FOLDER/account-balance "$ACCOUNTS_DIR/$3" $token $author_id 
+            ;;
+
+            visualize)
+                token_id_from_alias "$ACCOUNTS_DIR/$3" $4
+                if [ ! -z "$5" ]; then
+                    author_id_from_alias "$ACCOUNTS_DIR/$3" $5
+                fi
+                $SCRIPT_FOLDER/utility/show-commit-graph "$ACCOUNTS_DIR/$3" $token $author_id
+            ;;
+
+            *)
+                echo "Unknown option '$2' for 'delta-goc token'"
+                print_usage
+                exit 1
+            ;;
+        esac
+        ;;
+    
+    repo)
+        case $2 in
+            push)
+                $SCRIPT_FOLDER/repo-push "$ACCOUNTS_DIR/$3" $4
+            ;;
+
+            pull)
+                $SCRIPT_FOLDER/repo-pull "$ACCOUNTS_DIR/$3" $4 $5
+            ;;
+
+            broadcast)
+                $SCRIPT_FOLDER/repo-broadcast "$ACCOUNTS_DIR/$3"
+            ;;
+            
+            remote)
+                
+                REPO_PATH="$ACCOUNTS_DIR/$3"
+                if test ! -d $REPO_PATH; then
+                    echo "Invalid repo path '$REPO_PATH'" >&2
+                    exit 1
+                fi
+                cd $REPO_PATH
+                git remote add $4 ../$4
+            ;;
+
+            merge)
+                if [ ! -z $4 ]; then
+                    author_id_from_alias "$ACCOUNTS_DIR/$3" $4
+                fi
+                $SCRIPT_FOLDER/repo-merge "$ACCOUNTS_DIR/$3" $author_id
+            ;;
+
+            *)
+                echo "Unknown option '$2' for 'delta-goc repo'"
+                print_usage
+                exit 1
+            ;;
+        esac
+        ;;
+
+    config)
+        REPO_PATH="$ACCOUNTS_DIR/$2"
+
+        case $3 in
+
+        autoMergeUpdates)
+            cd $REPO_PATH
+            git config --bool goc.receive.autoMergeUpdate "$4"
+        ;;
+
+        debug)
+            cd $REPO_PATH
+            git config --bool goc.debug "$4"
+        ;;
+
+        *)
+            echo "Unknown configuration '$3'"
+            exit 1
+        ;;
+
+        esac
+    ;;
+
+    reset)
+        rm -rf $ACCOUNTS_DIR
+        echo "Removed all accounts"
+        ;;
+
+    *)
+        echo "unknown command $1"
+        print_usage
+        exit 1
+        ;;
+esac

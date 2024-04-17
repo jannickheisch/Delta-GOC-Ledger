@@ -1,0 +1,63 @@
+#!/bin/bash
+SCRIPTDIR="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
+ACCOUNT_PATH=$1
+ACCOUNT_ALIAS=$2
+
+if ! test -d $ACCOUNT_PATH; then
+    mkdir $ACCOUNT_PATH
+    git init $ACCOUNT_PATH 1>/dev/null 2>/dev/null
+    cd $ACCOUNT_PATH
+    mkdir .git/alias_lookup
+    mkdir .git/sha256_lookup 
+
+    mkdir .git/keys
+
+    touch .git/allowed_signers
+    git config gpg.ssh.allowedSignersFile ".git/allowed_signers"
+else 
+    cd $ACCOUNT_PATH
+fi
+
+if test -f .git/alias_lookup/$ACCOUNT_ALIAS; then
+    echo "Account with alias '$ACCOUNT_ALIAS' already exists">&2
+    exit 1
+fi
+
+
+
+if [ -z $ACCOUNT_ALIAS ]; then
+    echo "Empty ACCOUNT_ALIAS" >&2
+    exit 1
+fi
+
+if echo "$ACCOUNT_ALIAS" | grep -e "\/"; then
+    echo "Invalid account alias '$ACCOUNT_ALIAS', must not contain the '/' character" >&2
+    exit 1 
+fi
+
+
+
+ssh-keygen -t ed25519 -q -f ".git/keys/$ACCOUNT_ALIAS" -N "" -C "$ACCOUNT_ALIAS"
+
+pubkey="$(cat .git/keys/$ACCOUNT_ALIAS.pub | awk '{ print $2 }' )"
+id=${pubkey//"/"/"%2F"} # encode slash (because "/" in base64 representation of the key lead to invalid/wrong paths)
+echo $id > .git/alias_lookup/$ACCOUNT_ALIAS
+
+
+# setup git ssh key signing
+# git config user.name "$id"
+git config goc.scriptdir "$SCRIPTDIR"
+git config gpg.format ssh
+
+
+$SCRIPTDIR/utility/add-allowed-pubkey $ACCOUNT_PATH $pubkey
+
+EMPTY_TREE=$(git hash-object -w -t tree /dev/null) 
+# The commit contains the the alias of this author, and the reference used for mapping the alias to the pubkey.
+# Because this commit is signed, no one else can publish a alias in the name of the author. 
+# It is assumed that an alias was chosen that wasn't sued yet, otherwise this alias gets ignored by other peers.
+commit=$(echo "$ACCOUNT_ALIAS" | GIT_COMMITTER_NAME="$id" GIT_AUTHOR_NAME="$id" GIT_COMMITTER_EMAIL="" GIT_AUTHOR_EMAIL="" git commit-tree $EMPTY_TREE --gpg-sign=".git/keys/$ACCOUNT_ALIAS.pub")
+
+git update-ref "refs/heads/alias/$id" "$commit"
+
+echo "Account '$ACCOUNT_ALIAS' ($id) succesfully created."

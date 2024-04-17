@@ -1,0 +1,32 @@
+#!/bin/bash
+
+# Usage: repo-broadcast <repo-path>
+#
+# repo-path: absolute path of the author repository
+#
+# Pushes local frontier to any known remote.
+
+SCRIPTDIR="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
+REPO_PATH=$1
+
+# check input arguments
+if test ! -d $REPO_PATH; then
+    echo "Invalid repo path '$REPO_PATH'" >&2
+    exit 1
+fi
+
+cd $REPO_PATH
+
+REMOTES=$(git remote)
+
+if [ -z "$REMOTES" ]; then
+    echo "No remote repository known" >&2
+    exit 1
+fi
+
+for REMOTE in $REMOTES; do 
+    if ! $SCRIPTDIR/repo-push $REPO_PATH $REMOTE; then
+        echo "Error pushing new messages to '$REMOTE'" >&2
+    fi
+done
+

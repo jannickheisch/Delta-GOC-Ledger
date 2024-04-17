@@ -1,0 +1,145 @@
+#!/bin/bash
+
+# Usage: token-ackFrom <repo-path> <token-type> <sender-id> <amount>
+#
+# repo-path: absolute path of the author repository
+# token-type: hash of the token
+# sender-id: the author id of the sender
+# amount: the number of tokens that should be burned
+#
+#
+# Acknowledges all received tokens from the given sender, which are not already acknowledged.
+# 
+# Exists with exit code 0 on success or exit code 1 on error. If all received tokens are already acknowledged, exit code 2 is returned.
+
+SCRIPTDIR="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
+REPO_PATH=$1
+TOKEN_TYPE=$2
+SENDER_ID=$3
+EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+# check input arguments
+if test ! -d $REPO_PATH; then
+    echo "Invalid repo path '$REPO_PATH'" >&2
+    exit 1
+fi
+
+cd $REPO_PATH
+AUTHOR_ID="$(git config goc.author.id)"
+
+if [ -z $AUTHOR_ID ]; then
+    echo "The repository misses goc.author.id" >&2
+    exit 1
+fi
+
+if [ "$(git cat-file -t $TOKEN_TYPE 2>/dev/null)" = "commit" ]; then
+    if [ "$(git show -s --format=%p $TOKEN_TYPE | wc -w)" -ne 0 ]; then
+        echo "Token Type '$TOKEN_TYPE' unknown." >&2
+    fi
+else
+    echo "Token Type '$TOKEN_TYPE' unknown." >&2
+fi
+
+ACCOUNT_REF=$(git show-ref --hash refs/heads/frontier/$TOKEN_TYPE/$AUTHOR_ID)
+SENDER_REF=$(git show-ref --hash refs/heads/frontier/$TOKEN_TYPE/$SENDER_ID)
+
+# calculate unackedFrom
+UNACKED=0
+SENDER_GIVE_TO_TREE="$(git ls-tree $SENDER_REF giveTo | awk '{print $3}')"
+SENDER_GIVE_TO_BLOB=""
+if [ ! -z $SENDER_GIVE_TO_TREE ]; then
+    SENDER_GIVE_TO_BLOB=$(git ls-tree $SENDER_GIVE_TO_TREE $AUTHOR_ID | awk '{print $3}')
+fi
+
+RECEIVER_ACK_FROM_TREE=""
+if [ ! -z $ACCOUNT_REF ]; then
+    RECEIVER_ACK_FROM_TREE="$(git ls-tree $ACCOUNT_REF ackFrom | awk '{print $3}')"
+fi
+RECEIVER_ACK_FROM_BLOB=""
+if [ ! -z $RECEIVER_ACK_FROM_TREE ]; then
+    RECEIVER_ACK_FROM_BLOB=$(git ls-tree $RECEIVER_ACK_FROM_TREE $SENDER_ID | awk '{print $3}')
+fi
+
+if [ ! -z $SENDER_GIVE_TO_BLOB ] && [ ! -z $RECEIVER_ACK_FROM_BLOB ]; then
+    GIVE_TO_AMOUNT=$(git cat-file -p $SENDER_GIVE_TO_BLOB)
+    ACK_FROM_AMOUNT=$(git cat-file -p $RECEIVER_ACK_FROM_BLOB)
+    UNACKED=$(( $GIVE_TO_AMOUNT - $ACK_FROM_AMOUNT ))
+elif [ ! -z $SENDER_GIVE_TO_BLOB ]; then
+    GIVE_TO_AMOUNT=$(git cat-file -p $SENDER_GIVE_TO_BLOB)
+    UNACKED=$GIVE_TO_AMOUNT
+fi # else unacked stays 0
+
+if [ $(python3 -c "print($UNACKED == 0)") = "True" ]; then
+    echo "All received tokens from '$SENDER_ID' are currently acknowledged" >&2
+    exit 2
+fi
+
+# calculate ackFrom
+
+if [ -z $RECEIVER_ACK_FROM_BLOB ]; then
+    GIVE_TO_AMOUNT=$(git cat-file -p $SENDER_GIVE_TO_BLOB)
+    NEW_ACK_FROM_AMOUNT=$GIVE_TO_AMOUNT
+else
+    GIVE_TO_AMOUNT=$(git cat-file -p $SENDER_GIVE_TO_BLOB)
+    ACK_FROM_AMOUNT=$(git cat-file -p $RECEIVER_ACK_FROM_BLOB)
+    NEW_ACK_FROM_AMOUNT=$(python3 -c "print(max($GIVE_TO_AMOUNT, $ACK_FROM_AMOUNT))")
+fi
+
+
+# construct updated commit tree
+if [ ! -z $ACCOUNT_REF ]; then
+    # other fields dind't change:
+    CREATED_BLOB=$(git ls-tree $ACCOUNT_REF created | awk '{print $3}')
+    BURNED_BLOB=$(git ls-tree $ACCOUNT_REF burned | awk '{print $3}')
+    GIVE_TO_TREE=$(git ls-tree $ACCOUNT_REF giveTo | awk '{print $3}')
+else
+    # initialize other fields:
+    ZERO_BLOB=$(echo "0" | git hash-object --stdin -w )
+    EMPTY_TREE=$(git hash-object -w -t tree /dev/null)
+
+    CREATED_BLOB=$ZERO_BLOB
+    BURNED_BLOB=$ZERO_BLOB
+    GIVE_TO_TREE=$EMPTY_TREE
+fi
+
+BLOB=$(echo $NEW_ACK_FROM_AMOUNT | git hash-object --stdin -w)
+
+if [ -z $RECEIVER_ACK_FROM_TREE ]; then
+    NEW_ACK_FROM_TREE=$(echo -e $($SCRIPTDIR/utility/ls-tree-format -b $BLOB:$SENDER_ID) | git mktree)
+else
+    SENDERS=$(git ls-tree $RECEIVER_ACK_FROM_TREE | awk '{print $4}')
+
+    CMD="$SCRIPTDIR/utility/ls-tree-format -b $BLOB:$SENDER_ID"
+
+    for s in $SENDERS; do
+        if [ $s != $SENDER_ID ]; then
+            HASH=$(git ls-tree $RECEIVER_ACK_FROM_TREE $s | awk '{print $3}')
+            CMD="$CMD -b $HASH:$s"
+        fi
+    done
+
+    NEW_ACK_FROM_TREE=$(echo -e $($CMD) | git mktree)
+fi
+
+TREE_STR="$($SCRIPTDIR/utility/ls-tree-format -b $CREATED_BLOB:created -b $BURNED_BLOB:burned -t $GIVE_TO_TREE:giveTo -t $NEW_ACK_FROM_TREE:ackFrom)"
+TREE=$(echo -e $TREE_STR | git mktree)
+
+# commit tree
+parents=""
+if git show-ref --quiet --verify refs/heads/frontier/$TOKEN_TYPE/$AUTHOR_ID; then
+    parents="-p refs/heads/frontier/$TOKEN_TYPE/$AUTHOR_ID"
+else
+    parents="-p $TOKEN_TYPE"
+fi
+parents="$parents -p refs/heads/frontier/$TOKEN_TYPE/$SENDER_ID"
+
+# debug message (if enabled)
+commit_msg=""
+if [ "$(git config --bool goc.debug)" = "true" ]; then
+    commit_msg="ackFrom($TOKEN_TYPE/$AUTHOR_ID, $TOKEN_TYPE/$SENDER_ID)"
+fi
+
+COMMIT=$(echo "$commit_msg" | GIT_COMMITTER_NAME="$AUTHOR_ID" GIT_AUTHOR_NAME="$AUTHOR_ID" GIT_COMMITTER_EMAIL="" GIT_AUTHOR_EMAIL="" git commit-tree -S $TREE $parents)
+git update-ref "refs/heads/frontier/$TOKEN_TYPE/$AUTHOR_ID" "$COMMIT"
+
+echo "Acknowledged $UNACKED tokens of type '$TOKEN_TYPE' received from '$SENDER_ID'"

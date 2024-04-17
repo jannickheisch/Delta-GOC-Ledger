@@ -1,0 +1,42 @@
+#!/bin/bash
+
+
+# Usage: show-commit-graph <repo-path> [author-id] 
+#
+# repo-path: absolute path of the author repository
+# token-type: hash of the token
+# author-id: id of the author
+#
+#
+# Displays the commit graph of the specified token type in the terminal. 
+# If an author is specified, only the append-only log for this token-type and author is shown.
+
+REPO_PATH=$1
+TOKEN_TYPE=$2
+AUTHOR_ID=$3 #optional
+
+# check input arguments
+if test ! -d $REPO_PATH; then
+    echo "Invalid repo path '$REPO_PATH'" >&2
+    exit 1
+fi
+
+cd $REPO_PATH
+
+if [ -z $AUTHOR_ID ]; then
+    AUTHOR_ID="*"
+else
+    ARGS="--first-parent"
+fi
+
+if [ "$(git cat-file -t $TOKEN_TYPE 2>/dev/null)" = "commit" ]; then
+    if [ "$(git show -s --format=%p $TOKEN_TYPE | wc -w)" -ne 0 ]; then
+        echo "Token Type '$TOKEN_TYPE' unknown." >&2
+        exit 1
+    fi
+else
+    echo "Token Type '$TOKEN_TYPE' unknown." >&2
+    exit 1
+fi
+
+git log $ARGS --oneline --graph --decorate --decorate-refs="refs/heads/" $(git for-each-ref --format='%(objectname)' "refs/heads/frontier/$TOKEN_TYPE/$AUTHOR_ID")

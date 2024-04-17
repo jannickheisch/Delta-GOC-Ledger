@@ -1,0 +1,52 @@
+#!/bin/bash
+
+#
+# Hook script that automatically merges the received updates with the local frontier
+# 
+
+AUTHOR_ID=""
+SCRIPTDIR=$(git config goc.scriptdir)
+REPO_PATH=$(dirname $(dirname "$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"))
+
+# parse push options
+if test -n "$GIT_PUSH_OPTION_COUNT"
+then
+	i=0
+	while test "$i" -lt "$GIT_PUSH_OPTION_COUNT"
+	do
+		eval "value=\$GIT_PUSH_OPTION_$i"
+		case "$value" in
+		author-id=*)
+			AUTHOR_ID=${value#*=}
+			;;
+		reject)
+			exit 1
+		esac
+		i=$((i + 1))
+	done
+fi
+
+if [ -z $AUTHOR_ID ]; then
+	echo "Missing push option 'author-id'"
+	exit 1
+fi
+
+cd ..
+GIT_DIR=".git"
+
+# while read oldrev newrev refname
+# do
+# 	if ! $SCRIPTDIR/merge-ref $REPO_PATH $AUTHOR_ID $oldrev $newrev $refname; then
+# 		echo "Error while merging ref $refname"
+# 		exit 1
+# 	fi
+# done
+
+if [ $(git config --bool goc.receive.autoMergeUpdate) = "true" ]; then
+
+	# merge frontier
+	if ! $SCRIPTDIR/repo-merge $REPO_PATH $AUTHOR_ID; then
+		echo "Error while merging frontiers"
+		exit 1
+	fi
+fi

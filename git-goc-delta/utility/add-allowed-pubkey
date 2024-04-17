@@ -1,0 +1,37 @@
+#!/bin/bash
+
+# Usage: add-allowed-pubkey <public-key> [type]
+#
+# repo-path: absolute path of the author repository
+# public-key: public key that should be added to the allowed signers file
+# type (optional): type of the public key; defaults to 'ssh-ed25519'
+#
+#
+# Adds the given public-key to the allowed-signers file of this repository
+
+REPO_PATH=$1
+KEY=$2
+TYPE=$3
+
+# check input arguments
+if test ! -d $REPO_PATH; then
+    echo "Invalid repo path '$REPO_PATH'" >&2
+    exit 1
+fi
+
+if [ -z "$KEY" ]; then
+    echo "Public key is missing" >&2
+    exit 1
+fi
+
+if [ -z $TYPE ]; then
+    TYPE="ssh-ed25519"
+fi
+
+ALLOWED_SIGNERS_FILE="$REPO_PATH/.git/allowed_signers"
+
+if grep -qF "$KEY" "$ALLOWED_SIGNERS_FILE"; then # key already in allowedSigners file
+    exit 0
+fi
+
+echo "$KEY@goc namespaces=\"git\" $TYPE $KEY" >> $ALLOWED_SIGNERS_FILE

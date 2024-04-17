@@ -1,0 +1,39 @@
+#!/bin/bash
+
+# Usage: repo-pull <repo-path> <remote> <remote-author-id>
+#
+# repo-path: absolute path of the author repository
+# remote: name of the git remote
+# remote-author-id: the author id of the remote
+#
+# Fetches the remote frontier of the given remote.
+
+REPO_PATH=$1
+REMOTE=$2
+REMOTE_AUTHOR_ID=$3
+
+# check input arguments
+if test ! -d $REPO_PATH; then
+    echo "Invalid repo path '$REPO_PATH'" >&2
+    exit 1
+fi
+
+cd $REPO_PATH
+AUTHOR_ID="$(git config goc.author.id)"
+
+if [ -z $AUTHOR_ID ]; then
+    echo "The repository misses goc.author.id" >&2
+    exit 1
+fi
+
+if ! git remote show $REMOTE 1>/dev/null 2>/dev/null; then
+    echo "Remote '$REMOTE' unknown." >&2
+    exit 1
+fi
+
+if [ -z $REMOTE_AUTHOR_ID ]; then
+    echo "Please specify the author id (public key) associated with the given remote"
+    exit 1
+fi
+
+git fetch --no-auto-maintenance --no-auto-gc $REMOTE --refmap="" "refs/heads/*:refs/remotes/$REMOTE_AUTHOR_ID/*"

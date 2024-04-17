@@ -1,0 +1,99 @@
+#!/bin/bash
+
+# Usage: author-initialize <full-repo-path> <alias>
+#
+# full-repo-path: absolute path to the dictionary in which the new repository should be initialized
+# alias: alias of the author
+#
+# Initializes an author by setting up a new repository at the given directory, generating a ed25519 keypair and the for the Delta-GOC-Ledger required settings
+# Returns the ID (public key) of the initialized author.
+
+SCRIPTDIR="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
+REPO_PATH=$1
+AUTHOR_ALIAS=$2
+
+# check input arguments
+if [ -z $AUTHOR_ALIAS ]; then
+    echo "Specify an alias for this author." >&2
+    exit 1
+fi
+
+if test -d $REPO_PATH; then
+    echo "This author already exists" >&2
+    exit 1
+fi
+
+if echo "$AUTHOR_ALIAS" | grep -e "\/"; then
+    echo "Invalid account alias '$AUTHOR_ALIAS', must not contain the '/' character" >&2
+    exit 1 
+fi
+
+# init repo
+mkdir -p $REPO_PATH
+git init $REPO_PATH 1>/dev/null 2>/dev/null
+cd $REPO_PATH
+echo $AUTHOR_ALIAS > .git/account-alias
+mkdir .git/alias_lookup # local lookup directory to map aliases to ids
+mkdir .git/sha256_lookup # local lookup directory to map public keys to their sha256 fingerprint
+
+# generate private public ed25519 key pair
+mkdir -p .git/private
+ssh-keygen -t ed25519 -q -f ".git/private/id_ed25519" -N "" -C "$AUTHOR_ALIAS"
+
+if ! test -f .git/private/id_ed25519; then
+    echo "error creating keypair"
+    exit 1
+fi
+
+pubkey="$(cat .git/private/id_ed25519.pub | awk '{ print $2 }' )"
+author_id=${pubkey//"/"/"%2F"} # encode slash (because "/" in base64 representation of the key leads to invalid paths for the references used later)
+
+
+
+# setup git ssh key signing
+git config user.name "$author_id"
+git config goc.scriptdir "$SCRIPTDIR" # used in git hooks
+git config --bool goc.debug "false"
+git config gpg.format ssh
+git config user.signingkey .git/private/id_ed25519.pub
+touch .git/allowed_signers
+git config gpg.ssh.allowedSignersFile ".git/allowed_signers"
+
+$SCRIPTDIR/utility/add-allowed-pubkey $REPO_PATH $pubkey
+
+# store GOC related configuration
+git config goc.author.id "$author_id"
+git config goc.author.alias "$AUTHOR_ALIAS"
+git config goc.author.pubkey "$pubkey"
+git config goc.receive.autoMergeUpdate false
+echo $author_id > ".git/alias_lookup/$AUTHOR_ALIAS"
+
+# enable the receipt of signed pushes
+git config receive.advertisePushOptions true
+git config receive.certNonceSeed $(openssl rand -hex 256)
+
+# we dont allow the reception of non-fastforwards updates or the deletion of references
+git config receive.denyNonFastforwards true
+git config receive.denyDeletes true
+
+# publish alias
+EMPTY_TREE=$(git hash-object -w -t tree /dev/null) 
+
+# The commit contains the the alias of this author, and the reference used for mapping the alias to the pubkey.
+# Because this commit is signed, no one else can publish a alias in the name of the author. 
+# It is assumed that an alias was chosen that wasn't sued yet, otherwise this alias gets ignored by other peers.
+commit=$(echo "$AUTHOR_ALIAS" | GIT_COMMITTER_NAME="$author_id" GIT_AUTHOR_NAME="$author_id" GIT_COMMITTER_EMAIL="" GIT_AUTHOR_EMAIL="" git commit-tree -S $EMPTY_TREE)
+echo "$author_id" > ".git/alias_lookup/$AUTHOR_ALIAS"
+
+echo $author_id > .git/account-id
+git update-ref "refs/heads/alias/$author_id" "$commit"
+
+
+# setup git hooks
+cp $SCRIPTDIR/git-hooks/pre-receive .git/hooks/
+cp $SCRIPTDIR/git-hooks/post-receive .git/hooks/
+
+
+# return author ID
+echo "Author '$AUTHOR_ALIAS' with id '$author_id' succesfully created." >&2
+echo "$author_id"

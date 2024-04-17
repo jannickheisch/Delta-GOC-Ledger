@@ -1,0 +1,150 @@
+#!/bin/bash
+
+# Usage: repo-merge <repo-path> [sender-id]
+#
+# repo-path: absolute path of the author repository
+# sender-id (optional): the author id of the sender of whose updates should be merged; if not set, the frontier of every remote will be merged
+#
+#
+# Merges the updates of the remote frontier with the local frontier, while verifying that the resulting frontier is correct. 
+
+
+SCRIPTDIR="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
+REPO_PATH=$1
+SENDER_ID=$2 #optional
+
+
+# check input arguments
+
+if test ! -d $REPO_PATH; then
+    echo "Invalid repo path '$REPO_PATH'" >&2
+    exit 1
+fi
+
+cd $REPO_PATH
+
+if [ -z "$SENDER_ID" ]; then
+    SENDER_ID="*" # Merge all remote references ( ".*" = "any" in regex)
+    REMOTES=$(cd .git/refs/remotes && ls )
+else
+    REMOTES=$SENDER_ID
+fi
+
+# merge alias updates
+LOCAL_ALIASES=$(git for-each-ref --format='^%(refname)' refs/heads/alias/ ) # Retrieves a list of all local references with a "^" prefix (to indicate that those commits should not be included when used with git log)
+REMOTE_ALIASES=$(git for-each-ref --format='%(refname)' refs/remotes/$SENDER_ID/alias/* )
+
+if [ ! -z "$REMOTE_ALIASES" ]; then
+    ALIAS_DIFF=$(git log --format='%D' $REMOTE_ALIASES $LOCAL_ALIASES)
+fi
+
+# iterate over all commits that are not included in the local alias frontier
+for commit in $ALIAS_DIFF; do
+    
+    author="$( git log --pretty="%an" -n 1 $commit)"
+    name="$(git log --pretty=format:%B -n 1 $commit)"
+    
+    if [ -z $name ] || echo "$AUTHOR_ALIAS" | grep -e "\/" ; then # alias must be valid
+        continue
+    fi
+
+    # check if alias is already used by other id
+    if test -f ".git/alias_lookup/$name"; then
+        if [ "$(cat .git/alias_lookup/$name)" != $author ]; then
+            continue # Here a user interface could be implemented, where the user can resolve the conflicting aliases
+        fi
+    fi
+
+    pubkey=${author//"%2F"/"/"} # decode pubkey
+    sha256="$($SCRIPTDIR/utility/key-sha256-fingerprint $REPO_PATH $pubkey)"
+
+    $SCRIPTDIR/utility/add-allowed-pubkey $REPO_PATH $pubkey
+
+    fingerprint="$(git log --format='%GK' -n 1 $commit)"
+    
+    # verify signiture
+    if ! git verify-commit $commit > /dev/null 2>&1 || [ "$fingerprint" != "$sha256" ]; then
+        echo "alias commit '$commit' signature could not be verified"
+        continue
+    fi 
+
+    refname="$(git name-rev --name-only --no-undefined $commit)"
+
+    if [ -z $refname ]; then
+        continue # this alias commit is not referenced anymore, i.e. the alias was already updated
+    fi
+
+    id="$(echo $refname | awk -F/ '{print $NF}' )"
+    if [ $author != "$id" ]; then
+        continue # only the author can update its own alias 
+    fi
+    
+
+    # update alias
+    echo $author > ".git/alias_lookup/$name"
+    git update-ref "refs/heads/alias/$author" "$commit"
+done
+
+for remote in $REMOTES; do
+    LOCAL_TOKEN_REFS="$(git for-each-ref refs/heads/frontier --format='^%(refname)')" # Retrieves a list of all local frontier references with a "^" prefix (to indicate that those commits should not be included when used with git log)
+    REMOTE_TOKEN_REFS="$(git for-each-ref refs/remotes/$remote/frontier/*/* --format='%(refname)')" # Retrieves a list of all remote frontier references
+
+    if [ -z "$REMOTE_TOKEN_REFS" ]; then
+        exit 0
+    fi
+
+    TOKEN_COMMIT_DIFF="$(git log --format='%H' $LOCAL_TOKEN_REFS $REMOTE_TOKEN_REFS )" # compute the difference between the lcoal and remote frontier, i.e. a list of commits that are not included in the local frontier, but in the remote frontier
+
+
+    if [ -z "$TOKEN_COMMIT_DIFF" ]; then
+        exit 0 # empty diff, nothing needs to be merged
+    fi
+
+
+    # verify all new commits
+    for commit in $TOKEN_COMMIT_DIFF; do
+        author="$(git log --pretty="%an" -n 1 $commit)"
+        parents="$(git log --pretty=%P -n 1 $commit)" # parents of the commit
+        # verify signature
+        fingerprint="$(git log --pretty="%GK" -n 1 $commit)"
+        pubkey=${author//"%2F"/"/"}
+        $SCRIPTDIR/utility/add-allowed-pubkey $REPO_PATH $pubkey
+        sha256="$($SCRIPTDIR/utility/key-sha256-fingerprint $REPO_PATH $pubkey)"
+        if ! git verify-commit $commit > /dev/null 2>&1 || [ "$fingerprint" != "$sha256" ]; then 
+            echo "Error could not verify commit '$commit'."
+            exit 1 # abort update, because there are invalid commits included in the remote frontier. This way, the local frontier stays correct.
+        fi
+
+        if [ ! -z "$parents" ]; then
+            root_commits="$(git rev-list --first-parent --max-parents=0 $commit)"
+            if [ "$(echo "$root_commits" | wc -w)" != 1 ]; then
+                echo "The commit '$commit' points to multiple root commits."
+                exit 1 # abort update, because the commit history is invalid.
+            fi
+        fi
+
+        # add token alias lookup reference
+        if [ -z "$parents" ]; then
+            alias="$(git log --pretty=%s -n 1 $commit)"
+            if [ ! -z $alias ]; then
+                git update-ref "refs/local/token_alias/$alias" $commit
+            fi
+        fi
+    done
+
+    TOKEN_REFS_DIFF="$(git log --format=%D --decorate --decorate-refs="refs/remotes/*" $LOCAL_TOKEN_REFS $REMOTE_TOKEN_REFS)"
+
+    for ref in $TOKEN_REFS_DIFF; do
+        token_type="$( echo "$ref" | awk -F/ '{print $(NF-1)}')"
+        if ! git merge-base --is-ancestor $token_type $ref; then
+            echo "The reference '$ref' points to a different token ($token_type), then specified in the name"
+            exit 1
+        fi
+    done
+
+    # Finally, after all properties are verified, we use a local git fetch to update the local frontier, while ignoring any non-fast-forward updates
+    git fetch --no-auto-maintenance --no-auto-gc . "refs/remotes/$remote/frontier/*:refs/heads/frontier/*"
+
+done
+# merge ledger frontier
+

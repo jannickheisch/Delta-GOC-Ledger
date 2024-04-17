@@ -1,0 +1,45 @@
+#!/bin/bash
+
+# Usage: token-initialize <repo-path> <alias>
+#
+# repo-path: absolute path where the directory and repository of this author should be initialized
+# alias: alias of the initialized token
+#
+#
+# Initializes a new token, with the requested alias. The SHA-1 hash of the commit is the ID of the initialized token
+# Returns the ID of the initialized token
+
+REPO_PATH=$1
+TOKEN_ALIAS=$2
+
+# check input arguments
+if test ! -d $REPO_PATH; then
+    echo "Invalid repo path '$REPO_PATH'" >&2
+    exit 1
+fi
+
+if [ -z $TOKEN_ALIAS ]; then
+    echo "Missing token alias" >&2
+    exit 1
+fi
+
+cd $REPO_PATH
+AUTHOR_ID=$(git config goc.author.id)
+
+if [ -z $AUTHOR_ID ]; then
+    echo "The repository misses goc.author.id" >&2
+    exit 1
+fi
+
+# initialize() token (see pseudo code)
+EMPTY_TREE=$(git hash-object -w -t tree /dev/null) 
+COMMIT=$(echo "$TOKEN_ALIAS" | GIT_COMMITTER_NAME="$AUTHOR_ID" GIT_AUTHOR_NAME="$AUTHOR_ID" GIT_COMMITTER_EMAIL="" GIT_AUTHOR_EMAIL="" git commit-tree -S $EMPTY_TREE) # initialize returns an empty delta account state, therefore we commit an empty tree
+
+
+# update refs
+git update-ref "refs/heads/frontier/$COMMIT/$AUTHOR_ID" "$COMMIT"
+git update-ref "refs/local/token_alias/$TOKEN_ALIAS" "$COMMIT" # a local reference helps to quickly retrieve the token ID for a given token alias
+
+# return ID
+echo $COMMIT
+echo "Succesfully created token '$TOKEN_ALIAS'($COMMIT) for account '$AUTHOR_ID'" >&2

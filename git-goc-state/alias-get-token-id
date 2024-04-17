@@ -1,0 +1,31 @@
+#!/bin/bash
+
+# Usage: alias-get-author-id <repo-path> <token-alias>
+#
+# repo-path: absolute path of the author repository
+# token-alias: alias of the token
+#
+# Returns the token identifier (hash of the initilization commit) of the given alias. If no ID is found under the specified alias, exit code 1 is returned.
+
+SCRIPTDIR="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
+
+REPO_PATH=$1
+TOKEN_ALIAS=$2
+
+# check input arguments
+if test ! -d $REPO_PATH; then
+    echo "Invalid repo path '$REPO_PATH'" >&2
+    exit 1
+fi
+
+cd $REPO_PATH
+
+# retrieve alias
+HASH="$(git show-ref --hash refs/local/token_alias/$TOKEN_ALIAS)"
+
+if [ -z $HASH ]; then
+    echo "The token alias '$TOKEN_ALIAS' is unknown" >&2
+    exit 1
+fi
+
+echo $HASH

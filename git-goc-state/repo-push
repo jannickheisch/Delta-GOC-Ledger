@@ -1,0 +1,33 @@
+#!/bin/bash
+
+# Usage: repo-push <repo-path> <remote>
+#
+# repo-path: absolute path of the author repository
+# remote: name of the git remote
+#
+#
+# Pushes the local frontier to the given remote.
+
+REPO_PATH=$1
+REMOTE=$2
+
+# check input arguments
+if test ! -d $REPO_PATH; then
+    echo "Invalid repo path '$REPO_PATH'" >&2
+    exit 1
+fi
+
+cd $REPO_PATH
+AUTHOR_ID="$(git config goc.author.id)"
+
+if [ -z $AUTHOR_ID ]; then
+    echo "The repository misses goc.author.id" >&2
+    exit 1
+fi
+
+if ! git remote show $REMOTE 1>/dev/null 2>/dev/null; then
+    echo "Remote '$REMOTE' unknown." >&2
+    exit 1
+fi
+
+git push $REMOTE "refs/heads/*:refs/remotes/$AUTHOR_ID/*" --signed --push-option author-id=$AUTHOR_ID

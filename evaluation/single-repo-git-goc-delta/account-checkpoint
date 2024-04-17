@@ -1,0 +1,223 @@
+#!/bin/bash
+
+SCRIPTDIR="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
+REPO_PATH=$1
+TOKEN_ALIAS=$2
+AUTHOR_ALIAS=$3
+EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+# check input arguments
+if test ! -d $REPO_PATH; then
+    echo "Invalid repo path '$REPO_PATH'" >&2
+    exit 1
+fi
+
+cd $REPO_PATH
+
+AUTHOR_ID=$($SCRIPTDIR/alias-get-author-id $REPO_PATH $AUTHOR_ALIAS)
+TOKEN_TYPE=$($SCRIPTDIR/alias-get-token-id $REPO_PATH $TOKEN_ALIAS)
+
+if [ -z $AUTHOR_ID ] || [ -z $TOKEN_TYPE ]; then
+    echo "Unknown alias" >&2
+    exit 1
+fi
+
+if [ "$(git cat-file -t $TOKEN_TYPE 2>/dev/null)" = "commit" ]; then
+    if [ "$(git show -s --format=%p $TOKEN_TYPE | wc -w)" -ne 0 ]; then
+        echo "Token Type '$TOKEN_TYPE' unknown." >&2
+    fi
+else
+    echo "Token Type '$TOKEN_TYPE' unknown." >&2
+fi
+
+
+# compute the diff between last checkpoint and latest commit of this account 
+curr_checkpoint="$(git show-ref --hash refs/local/checkpoint/$TOKEN_TYPE/$AUTHOR_ID)"
+latest_commit="$(git show-ref --hash refs/heads/frontier/$TOKEN_TYPE/$AUTHOR_ID)"
+
+
+if [ ! -z "$latest_commit" ]; then
+    if [ -z $curr_checkpoint ]; then
+        diff="$(git log --format='%H' --reverse --first-parent --author="$AUTHOR_ID" $latest_commit)" #entire history
+    else
+        if [ "$(git log --pretty=%P --first-parent -n 1 "$curr_checkpoint")" = "$latest_commit" ]; then # latest checkpoint point to latest commit, i.e. it is still up to date
+            echo $curr_checkpoint
+            exit 0
+        fi
+        diff="$(git log --format='%H' --reverse --first-parent --author="$AUTHOR_ID" $curr_checkpoint..$latest_commit)" # diff between latest checkpoint and frontier
+        
+        diff="$curr_checkpoint $diff" # include the latest checkpoint
+    fi
+else
+    if [ ! -z $curr_checkpoint ]; then
+        if [ "$(git log --pretty=%P --first-parent -n 1 "$curr_checkpoint")" = "$TOKEN_TYPE" ]; then # the checkpoint is pointing to the inital commit, because this author hasn't interacted with the token yet
+            echo $curr_checkpoint
+            exit 2
+        fi
+    fi
+fi
+
+# create new checkpoint by merging the latest checkpoint (full account) with all new commits (delta states)
+curr_create=0
+curr_burned=0
+declare -A curr_giveTo
+declare -A curr_ackFrom
+
+curr_balance=0
+
+# iterate over all commits between the last checkpoint and the latest commit of this account and merge all delta states, while ensuring the correctness of the resulting ledger state
+for commit in $diff; do
+    # merge create counter
+    create_blob=$(git ls-tree $commit created | awk '{print $3}')
+    if [ ! -z $create_blob ]; then
+        create=$(git cat-file -p $create_blob)
+        max_create="$(python3 -c "print(max($create,$curr_create))")"
+        curr_balance="$(python3 -c "print($curr_balance + ($max_create - $curr_create))")"
+        curr_create=$max_create
+    fi
+
+    # merge burn counter
+    burn_blob=$(git ls-tree $commit burned | awk '{print $3}')
+    if [ ! -z $burn_blob ]; then
+        burn=$(git cat-file -p $burn_blob)
+        max_burn=$(python3 -c "print(max($burn, $curr_burned))")  
+        curr_balance="$(python3 -c "print($curr_balance - ($max_burn - $curr_burned))")"
+        curr_burned=$max_burn
+    fi
+
+    # merge giveTo dictionary
+    give_to_tree="$(git ls-tree $commit giveTo | awk '{print $3}')"
+    if [ ! -z "$give_to_tree" ] && [ "$give_to_tree" != $EMPTY_TREE ] ; then
+        give_to_accs="$(git ls-tree $give_to_tree | awk '{print $4}')"
+        for acc in $give_to_accs; do
+            blob=$(git ls-tree $give_to_tree $acc | awk '{print $3}')
+            acc_give_amount=$(git cat-file -p $blob)
+             
+            if [[ -z ${curr_giveTo[$acc]} ]]; then
+                curr_giveTo["$acc"]=$acc_give_amount
+                curr_balance="$(python3 -c "print($curr_balance - $acc_give_amount)")"
+            else
+                max_giveTo=$(python3 -c "print(max($acc_give_amount, ${curr_giveTo[$acc]} ))")
+                curr_balance=$(python3 -c "print($curr_balance - ($max_giveTo - ${curr_giveTo[$acc]}))")
+                curr_giveTo["$acc"]=$max_giveTo
+            fi
+        done
+    fi
+
+    # merge ackFrom dictionary + check if those tokens were sent by the sender's account
+    ack_from_tree="$(git ls-tree $commit ackFrom | awk '{print $3}')"
+    if [ ! -z "$ack_from_tree" ] && [ "$ack_from_tree" != $EMPTY_TREE ]; then
+        ack_from_accs="$(git ls-tree $ack_from_tree | awk '{print $4}')"
+        for acc in $ack_from_accs; do
+            blob=$(git ls-tree $ack_from_tree $acc | awk '{print $3}')
+            acc_ackFrom_amount=$(git cat-file -p $blob)
+            is_new_acknowledgement=false # this boolean value indicates whether the acknowledgement is already included in the full state
+            if [[ -z ${curr_ackFrom[$acc]} ]]; then
+                is_new_acknowledgement=true
+                curr_ackFrom["$acc"]=$acc_ackFrom_amount
+                curr_balance=$(python3 -c "print($curr_balance + $acc_ackFrom_amount)")
+            else
+                max_ack=$(python3 -c "print(max($acc_ackFrom_amount, ${curr_ackFrom[$acc]} ))")
+                if [ $max_ack != ${curr_ackFrom[$acc]} ]; then
+                    is_new_acknowledgement=true
+                    curr_balance=$(python3 -c "print($curr_balance + ($max_ack - ${curr_ackFrom[$acc]}))")
+                fi
+                curr_ackFrom["$acc"]=$max_ack        
+            fi
+
+            # check wheter the acknowledged tokens were indeed send by this account id. Checkpoints are trusted and don't require additional verification
+            if [ $is_new_acknowledgement = "true" ] && [ $commit != "$curr_checkpoint" ]; then
+                parent="$(git show -s --format=%H $commit^2)" # the second parent points to the latest commit of the sender
+
+                if [ -z $parent ]; then # The GOC Ledger allows transactions where the sender and receiver are the same.
+                    parent="$(git show -s --format=%H $commit^1)" # In this case, the associated giveTo-commit only has one parent (because send and acknowledgement states are in the same log).
+                fi
+
+                if [ -z $parent ]; then
+                    echo "Delta state '$commit' acknowledges tokens, but has no reference to the sender" >&2
+                    exit 1
+                fi
+
+                if ! git merge-base --is-ancestor $parent refs/heads/frontier/$TOKEN_TYPE/$acc ; then # the reference must point to a commit of the senders account log
+                    echo "Delta state '$commit' acknowledges tokens, but has a reference to a wrong sender" >&2
+                    exit 1
+                fi
+
+                sender_commits=$(git log --reverse --first-parent --format=%H $parent)
+
+                verified=false
+                for sender_commit in $sender_commits; do
+                    give_to_blob=$(git ls-tree -r $sender_commit giveTo/$AUTHOR_ID | awk '{print $3}')
+
+                    if [ -z $give_to_blob ]; then
+                        continue # this commit does not contain a giveTo field for AUTHOR_ID
+                    fi
+
+                    giveto_amount=$(git cat-file -p $give_to_blob)
+
+                    if [ $(python3 -c "print($giveto_amount >= ${curr_ackFrom[$acc]})") ]; then 
+                        verified=true
+                        break # found a state of the sender that includes a giveTo amount larger or equal to the amount of acknowledged token of the recipient (AUTHOR_ID)
+                    fi
+                done
+
+                if [ $verified = "false" ]; then
+                    echo "The log of the sender '$acc' does not include any state that has a giveTo counter larger or equal to the ackFrom counter of the recipient '$AUTHOR_ID' (ackFrom commit: '$commit')" >&2
+                    exit 1
+                fi
+            fi
+        done
+    fi
+
+    #check balance
+    if [ $(python3 -c "print($curr_balance < 0)") = "True" ]; then
+        echo "Error creating checkpoint: the author $AUTHOR_ID has a balance below zero for token '$TOKEN_TYPE' at commit '$commit' "
+        exit 1
+    fi
+done
+
+
+# create tree conaining the resulting state
+create_blob=$(echo $curr_create | git hash-object --stdin -w)
+burn_blob=$(echo $curr_burned | git hash-object --stdin -w)
+
+give_to_tree_cmd=""
+for k in "${!curr_giveTo[@]}"; do
+    v="${curr_giveTo[$k]}"
+    blob=$(echo $v | git hash-object --stdin -w)
+    give_to_tree_cmd="$give_to_tree_cmd -b $blob:$k"
+done
+if [ -z "$give_to_tree_cmd" ]; then
+    give_to_tree=$EMPTY_TREE
+else
+    give_to_tree=$(echo -e $($SCRIPTDIR/utility/ls-tree-format $give_to_tree_cmd) | git mktree)
+fi
+
+ack_from_tree_cmd=""
+for k in "${!curr_ackFrom[@]}"; do
+    v="${curr_ackFrom[$k]}"
+    blob=$(echo $v | git hash-object --stdin -w)
+    ack_from_tree_cmd="$ack_from_tree_cmd -b $blob:$k"
+done
+if [ -z "$ack_from_tree_cmd" ]; then
+    ack_from_tree=$EMPTY_TREE
+else
+    ack_from_tree=$(echo -e $($SCRIPTDIR/utility/ls-tree-format $ack_from_tree_cmd) | git mktree)
+fi
+
+if [ -z $latest_commit ]; then
+    parent=$TOKEN_TYPE
+else
+    parent=$latest_commit
+fi
+
+# commit checkpoint
+tree="$(echo -e $($SCRIPTDIR/utility/ls-tree-format -b $create_blob:created -b $burn_blob:burned -t $give_to_tree:giveTo -t $ack_from_tree:ackFrom) | git mktree)"
+commit=$(echo "checkpoint" | GIT_COMMITTER_NAME="$AUTHOR_ID" GIT_AUTHOR_NAME="$AUTHOR_ID" GIT_COMMITTER_EMAIL="" GIT_AUTHOR_EMAIL="" git commit-tree $tree -p $parent)
+git update-ref "refs/local/checkpoint/$TOKEN_TYPE/$AUTHOR_ID" "$commit"
+echo $commit
+
+# Signal that the account has no interactions with this
+if [ -z "$latest_commit" ]; then
+    exit 2
+fi

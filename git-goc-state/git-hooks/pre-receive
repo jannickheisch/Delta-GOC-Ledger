@@ -1,0 +1,57 @@
+#!/bin/bash
+#
+# Hook script to verify, that the push is correctly signed and that all received references are pushed to the right location.
+# Becasue receive.denyNonFastforwards and receive.denyDeletes are set to true, git automatically verifies that the received changes are fast-forward updates and that no refrences are removed.
+
+AUTHOR_ID=""
+SCRIPTDIR=$(git config goc.scriptdir)
+REPO_PATH=$(dirname $(dirname "$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"))
+
+# parse push options
+if test -n "$GIT_PUSH_OPTION_COUNT"
+then
+	i=0
+	while test "$i" -lt "$GIT_PUSH_OPTION_COUNT"
+	do
+		eval "value=\$GIT_PUSH_OPTION_$i"
+		case "$value" in
+		author-id=*)
+			AUTHOR_ID=${value#*=}
+			;;
+		reject)
+			exit 1
+		esac
+		i=$((i + 1))
+	done
+fi
+
+if [ -z $AUTHOR_ID ]; then
+	echo "Missing push option 'author-id'"
+	exit 1
+fi
+
+# verify signature
+pubkey=${AUTHOR_ID//"%2F"/"/"} # decode pubkey
+sha256="$($SCRIPTDIR/utility/key-sha256-fingerprint $REPO_PATH $pubkey)"
+
+$SCRIPTDIR/utility/add-allowed-pubkey $REPO_PATH $pubkey # in this test setup we allow every pubkey, otherwise the user must add a pubkey manually before receiving any updates from this node
+
+if [ "$GIT_PUSH_CERT_STATUS" != "G" ]; then
+    echo "Invalid signature"
+    exit 1
+fi
+
+if [ "$sha256" != "$GIT_PUSH_CERT_KEY" ]; then
+	echo "The SHA256 $sha256 of '$AUTHOR_ID' is not matching $GIT_PUSH_CERT_KEY"
+	exit 1
+fi
+
+while read oldrev newrev refname
+do
+	# check that peer updates only his refs
+	if ! [[  "$refname" == "refs/remotes/$AUTHOR_ID/alias"* ]] && ! [[ "$refname" == "refs/remotes/$AUTHOR_ID/frontier/"* ]]; then
+		echo "Forbidden to update $refname, only refs in refs/remotes/$AUTHOR_ID/* can be updated by this author"
+		exit 1
+	fi
+
+done

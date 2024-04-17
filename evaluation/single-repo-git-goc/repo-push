@@ -1,0 +1,27 @@
+#!/bin/bash
+
+REPO_PATH=$1
+AUTHOR_ALIAS=$2
+REMOTE=$3
+
+# check input arguments
+if test ! -d $REPO_PATH; then
+    echo "Invalid repo path '$REPO_PATH'" >&2
+    exit 1
+fi
+
+cd $REPO_PATH
+
+AUTHOR_ID=$($SCRIPTDIR/alias-get-author-id $REPO_PATH $AUTHOR_ALIAS)
+
+if [ -z $AUTHOR_ID ]; then
+    echo "Unknown alias" >&2
+    exit 1
+fi
+
+if ! git remote show $REMOTE 1>/dev/null 2>/dev/null; then
+    echo "Remote '$REMOTE' unknown." >&2
+    exit 1
+fi
+
+git -c user.signingkey=".git/keys/$ACCOUNT_ALIAS.pub" push $REMOTE "refs/heads/*:refs/remotes/$AUTHOR_ID/*" --signed --push-option author-id=$AUTHOR_ID

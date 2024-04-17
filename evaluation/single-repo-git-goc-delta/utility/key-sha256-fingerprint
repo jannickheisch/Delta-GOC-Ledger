@@ -1,0 +1,55 @@
+#!/bin/bash
+
+# Usage: key-sha256-fingerprint [--no-prefix] <repo-path> <public-key> [type]
+#
+# repo-path: absolute path of the author repository
+# public-key: public key that should be added to the allowed signers file
+# type (optional): type of the public key; defaults to 'ssh-ed25519'
+#
+# --no-prefix: returns the SHA256 hash without the "SHA256:" prefix
+#
+# Computes and returns the sha256 hash of the given public key. Computed hashes are cashed, meaning thaht subsequent calls with the same public key will not recompute the hash.
+
+if  [ "$1" = "--no-prefix" ]; then
+    NO_PREFIX=true
+    shift 1
+fi
+
+REPO_PATH=$1
+KEY=$2
+TYPE=$3 #optional
+
+# check input arguments
+if test ! -d $REPO_PATH; then
+    echo "Invalid repo path '$REPO_PATH'" >&2
+    exit 1
+fi
+
+if [ -z "$TYPE" ]; then
+    TYPE="ssh-ed25519"
+fi
+
+id=${KEY//"/"/"2%"}
+
+if test -f "$REPO_PATH/sha256_lookup/$id.sha256"; then
+    sha256="$(cat $REPO_PATH/sha256_lookup/$id.sha256)"
+    if [ "$NO_PREFIX" = true ]; then
+        sha256=${sha256#"SHA256:"} # remove prefix
+    fi
+    echo $sha256
+    exit 0
+fi
+
+# compute SHA 256 Hash
+sha256="$(echo "$TYPE $KEY $KEY@goc" | ssh-keygen -lf - | awk '{ print $2 }')"
+
+if [ -z "$sha256" ]; then
+    echo "Error calculating sha256 fingerprint for $key" >&2
+    exit 1
+fi
+
+echo $sha256 > "$REPO_PATH/.git/sha256_lookup/$id.sha256" # cache calculated sha256
+if [ "$NO_PREFIX" = true ]; then
+    sha256=${sha256#"SHA256:"} # remove prefix
+fi
+echo $sha256

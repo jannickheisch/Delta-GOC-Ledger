@@ -1,0 +1,27 @@
+#!/bin/bash
+
+# Usage: alias-get-author-id <repo-path> <author-alias>
+#
+# repo-path: absolute path of the author repository
+# author-alias: alias of the author
+#
+# Returns the author identifier of the given alias. If no ID is found under the specified alias, exit code 1 is returned.
+
+REPO_PATH=$1
+AUTHOR_ALIAS=$2
+
+if test ! -d $REPO_PATH; then
+    echo "Invalid repo path '$REPO_PATH'" >&2
+    exit 1
+fi
+
+if ! test -f "$REPO_PATH/.git/alias_lookup/$AUTHOR_ALIAS"; then
+    echo "There is no stored reference for alias '$AUTHOR_ALIAS'." >&2
+    exit 1
+fi
+
+key="$(cat "$REPO_PATH/.git/alias_lookup/$AUTHOR_ALIAS")"
+
+#key=${key//"/"/"%2F"}
+
+echo $key

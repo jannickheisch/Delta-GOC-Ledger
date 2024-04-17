@@ -1,0 +1,90 @@
+#!/bin/bash
+
+# Usage: account-balance [-v] <repo-path> <token type> [author-id]
+#
+#
+# repo-path: absolute path of the author repository
+# token type: hash of the token
+# author-id (optional): the author, for which the balance should be computed; defaults to the author of this repository
+#
+# 
+# Returns the current balance of the given account
+
+SCRIPTDIR="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
+REPO_PATH=$1
+TOKEN_TYPE=$2
+AUTHOR_ID=$3
+EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+# check input arguments
+if test ! -d $REPO_PATH; then
+    echo "Invalid repo path '$REPO_PATH'" >&2
+    exit 1
+fi
+
+cd $REPO_PATH
+
+if [ -z "$AUTHOR_ID" ]; then
+    AUTHOR_ID="$(git config goc.author.id)"
+fi
+
+if [ -z $AUTHOR_ID ]; then
+    echo "The repository misses goc.author.id" >&2
+    exit 1
+fi
+
+if [ "$(git cat-file -t $TOKEN_TYPE 2>/dev/null)" = "commit" ]; then
+    if [ "$(git show -s --format=%p $TOKEN_TYPE | wc -w)" -ne 0 ]; then
+        echo "Token Type '$TOKEN_TYPE' unknown." >&2
+    fi
+else
+    echo "Token Type '$TOKEN_TYPE' unknown." >&2
+fi
+
+#retrieve latest checkpoint
+checkpoint=$($SCRIPTDIR/account-checkpoint $REPO_PATH $TOKEN_TYPE $AUTHOR_ID)
+checkpoint_exit_code=$(echo $?)
+if [ $checkpoint_exit_code = 1 ]; then
+    echo "Error while creating checkpoint." >&2
+    exit 1
+elif [ $checkpoint_exit_code = 2 ]; then
+    echo "0"
+    exit 0
+fi
+
+# created tokens
+created_blob=$(git ls-tree $checkpoint created | awk '{print $3}')
+created=$(git cat-file -p $created_blob)
+
+# burned tokens
+burned_blob=$(git ls-tree $checkpoint burned | awk '{print $3}')
+burned=$(git cat-file -p $burned_blob)
+
+# givenTo tokens
+give_to_amount="0"
+give_to_tree="$(git ls-tree $checkpoint giveTo | awk '{print $3}')"
+if [ "$give_to_tree" != $EMPTY_TREE ]; then
+    give_to_blobs="$(git ls-tree $give_to_tree | awk '{print $3}')"
+    for blob in $give_to_blobs; do
+        acc_give_amount=$(git cat-file -p $blob)
+        give_to_amount=$(python3 -c "print($give_to_amount + $acc_give_amount)")
+    done
+fi
+
+# ackFrom tokens
+ack_from_amount="0"
+ack_from_tree="$(git ls-tree $checkpoint ackFrom | awk '{print $3}')"
+
+if [ "$ack_from_tree" != $EMPTY_TREE ]; then
+    ack_from_blobs="$(git ls-tree $ack_from_tree | awk '{print $3}')"
+
+    for blob in $ack_from_blobs; do
+        acc_ack_amount=$(git cat-file -p $blob)
+        ack_from_amount=$(python3 -c "print($ack_from_amount + $acc_ack_amount)")
+    done
+fi
+
+#calculate balance
+balance=$(python3 -c "print($created + $ack_from_amount - $burned - $give_to_amount)")
+
+echo $balance

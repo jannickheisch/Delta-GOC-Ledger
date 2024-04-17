@@ -1,0 +1,75 @@
+#!/bin/bash
+
+SCRIPTDIR="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
+REPO_PATH=$1
+TOKEN_ALIAS=$2
+AUTHOR_ALIAS=$3
+
+EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+# check input arguments
+if test ! -d $REPO_PATH; then
+    echo "Invalid repo path '$REPO_PATH'" >&2
+    exit 1
+fi
+
+cd $REPO_PATH
+
+AUTHOR_ID=$($SCRIPTDIR/alias-get-author-id $REPO_PATH $AUTHOR_ALIAS)
+TOKEN_TYPE=$($SCRIPTDIR/alias-get-token-id $REPO_PATH $TOKEN_ALIAS)
+
+if [ -z $AUTHOR_ID ] || [ -z $TOKEN_TYPE ]; then
+    echo "Unknown alias" >&2
+    exit 1
+fi
+
+if [ "$(git cat-file -t $TOKEN_TYPE 2>/dev/null)" = "commit" ]; then
+    if [ "$(git show -s --format=%p $TOKEN_TYPE | wc -w)" -ne 0 ]; then
+        echo "Token Type '$TOKEN_TYPE' unknown." >&2
+    fi
+else
+    echo "Token Type '$TOKEN_TYPE' unknown." >&2
+fi
+
+ACCOUNT_REF=$(git show-ref --hash refs/heads/frontier/$TOKEN_TYPE/$AUTHOR_ID)
+
+if [ -z $ACCOUNT_REF ]; then # this author has never interacted with this token, so its balance is zero 
+    echo "0"
+    exit 0
+fi
+
+# created tokens
+CREATED_BLOB=$(git ls-tree $ACCOUNT_REF created | awk '{print $3}')
+CREATED=$(git cat-file -p $CREATED_BLOB)
+
+#burned tokens
+BURNED_BLOB=$(git ls-tree $ACCOUNT_REF burned | awk '{print $3}')
+BURNED=$(git cat-file -p $BURNED_BLOB)
+
+#givenTo tokens
+GIVE_TO_AMOUNT="0"
+GIVE_TO_TREE="$(git ls-tree $ACCOUNT_REF giveTo | awk '{print $3}')"
+
+GIVE_TO_BLOBS="$(git ls-tree $GIVE_TO_TREE | awk '{print $3}')"
+
+for blob in $GIVE_TO_BLOBS; do
+    ACC_GIVE_AMOUNT=$(git cat-file -p $blob)
+    GIVE_TO_AMOUNT=$(python3 -c "print($GIVE_TO_AMOUNT + $ACC_GIVE_AMOUNT)")
+done
+
+#ackFrom tokens
+ACK_FROM_AMOUNT="0"
+ACK_FROM_TREE="$(git ls-tree $ACCOUNT_REF ackFrom | awk '{print $3}')"
+
+ACK_FROM_BLOBS="$(git ls-tree $ACK_FROM_TREE | awk '{print $3}')"
+
+for blob in $ACK_FROM_BLOBS; do
+    ACC_ACK_AMOUNT=$(git cat-file -p $blob)
+    ACK_FROM_AMOUNT=$(python3 -c "print($ACK_FROM_AMOUNT + $ACC_ACK_AMOUNT)")
+done
+
+
+#calculate balance
+BALANCE=$(python3 -c "print($CREATED + $ACK_FROM_AMOUNT - $BURNED - $GIVE_TO_AMOUNT)")
+
+echo $BALANCE

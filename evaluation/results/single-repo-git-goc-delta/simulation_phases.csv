@@ -1,0 +1,6 @@
+f_name,phase_name,num_operations
+new_data/blockchair_erc-20_transactions_20170427.tsv.gz,author_init,0
+new_data/blockchair_erc-20_transactions_20170427.tsv.gz,token_init,7935
+new_data/blockchair_erc-20_transactions_20170427.tsv.gz,token_create,8016
+new_data/blockchair_erc-20_transactions_20170427.tsv.gz,transactions_start,10935
+new_data/blockchair_erc-20_transactions_20170427.tsv.gz,transactions_end,40284
